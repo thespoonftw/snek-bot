@@ -1,7 +1,9 @@
 import os
 import json
 import discord
+import datetime
 from dotenv import load_dotenv
+from discord.ext import tasks
 
 load_dotenv()
 
@@ -34,11 +36,27 @@ async def on_ready():
 
     if (listings_message.content != LISTINGS_MESSAGE):
         await listings_message.edit(content=LISTINGS_MESSAGE)
+
+    hourly_task.start()
     
 
+@client.event
+async def on_disconnect():
+
+    print('Bot is shutting down.')
+    save_database()
+
+
+@tasks.loop(hours=1)
+async def hourly_task():
+
+    await client.wait_until_ready()
+
+    current_time = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"Hourly task executed at {current_time}")
+    save_database()
     
 
-    
 @client.event
 async def on_message(message):
 
@@ -53,7 +71,6 @@ async def on_message(message):
     # Delete messages in the list channel
     if message.channel == listing_channel:
         await message.delete()
-
 
         
 @client.event
@@ -250,7 +267,6 @@ async def get_listings_message():
     
 
 def get_message_id(message_str, channel_id):
-    read_database()
     for message_id, match_id in DATABASE.get(str(message_str), {}).items():
         if channel_id == match_id:
             return int(message_id)
@@ -258,26 +274,20 @@ def get_message_id(message_str, channel_id):
 
 
 def get_channel_id(message_str, message_id):
-    read_database()
     return DATABASE.get(message_str, {}).get(str(message_id))   
 
 
 def save_message(message_str, message_id, channel_id):
-    read_database()
     DATABASE.setdefault(message_str, {})
     DATABASE[message_str][message_id] = channel_id
-    save_database()
 
 
 def get_field(key):
-    read_database()
     return DATABASE.get(key)
 
 
 def save_field(key, value):
-    read_database()
     DATABASE.setdefault(key, value)
-    save_database()
     
 
 def read_database():
