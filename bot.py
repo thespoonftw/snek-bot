@@ -32,6 +32,8 @@ async def on_ready():
 
     print(f'{client.user} has connected to Discord!')
 
+    read_database()
+
     listings_message = await get_listings_message()
 
     if (listings_message.content != LISTINGS_MESSAGE):
