@@ -276,12 +276,12 @@ def get_message_id(message_str, channel_id):
 
 
 def get_channel_id(message_str, message_id):
-    return DATABASE.get(message_str, {}).get(str(message_id))   
+    return DATABASE.get(str(message_str), {}).get(str(message_id))
 
 
 def save_message(message_str, message_id, channel_id):
     DATABASE.setdefault(message_str, {})
-    DATABASE[message_str][message_id] = channel_id
+    DATABASE[str(message_str)][str(message_id)] = channel_id
 
 
 def get_field(key):
