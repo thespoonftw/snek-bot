@@ -8,22 +8,13 @@ from discord.ext import tasks
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-CATEGORY_ID = os.getenv("NEW_CHANNEL_CATEGORY_ID")
-USER_ROLE_ID = os.getenv("USER_ROLE_ID")
 GUILD_ID = os.getenv("GUILD_ID")
-LISTINGS_MESSAGE = os.getenv("LISTINGS_MESSAGE")
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 INTENTS.reactions = True
 DATABASE_JSON = "database.json"
 DATABASE = {}
-
-JOIN_MSG_KEY = "join_messsages"
-LEAVE_MSG_KEY = "leave_messages"
-LIST_MSG_KEY = "list_messages"
-LISTINGS_CHANNEL_ID_KEY = "listings_channel_id"
-LISTINGS_MESSAGE_ID_KEY = "listings_message_id"
 
 client = discord.Client(intents=INTENTS)
 
@@ -34,29 +25,23 @@ async def on_ready():
 
     read_database()
 
-    listings_message = await get_listings_message()
+    for channel_id in get_listing_channel_ids():
 
-    if (listings_message.content != LISTINGS_MESSAGE):
-        await listings_message.edit(content=LISTINGS_MESSAGE)
+        message = await get_info_message(channel_id)
+        channel = get_channel(channel_id)
+        message_content = get_info_message_content(channel_id)
 
-    hourly_task.start()
+        if message is None:
+            message = await channel.send("New channel")
+            save_info_message(channel_id, message.id)
+
+        await message.edit(content=message_content)
     
 
 @client.event
 async def on_disconnect():
 
     print('Bot is shutting down.')
-    save_database()
-
-
-@tasks.loop(hours=1)
-async def hourly_task():
-
-    await client.wait_until_ready()
-
-    current_time = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"Hourly task executed at {current_time}")
-    save_database()
     
 
 @client.event
@@ -65,16 +50,55 @@ async def on_message(message):
     # Ignore messages from the bot itself
     if message.author == client.user:
         return
+
+    # get first arguement
+    args = message.content.split()
+    if len(args) == 0:
+        return
+    cmd = args[0]
+
+    is_in_listings = message.channel.id in get_listing_channel_ids()
+    is_in_listeds = message.channel.id in get_listed_channel_ids()
     
-    await read_command(message)
+    if is_in_listings:
 
-    listing_channel = await get_listings_channel()
-
-    # Delete messages in the list channel
-    if message.channel == listing_channel:
         await message.delete()
 
+        if not get_listing_role(message.channel.id) in message.author.roles:
+            return
+
+        if cmd == '$create':
+            await cmd_create_and_list(message)
+
+    elif is_in_listeds:
+
+        if not get_listing_role_for_listed(message.channel.id) in message.author.roles:
+            return
+
+        if cmd == '$rename':
+            await cmd_update_name(message)
+
+        elif cmd == '$desc':
+            await cmd_update_description(message)
+
+        elif cmd == '$role':
+            await cmd_update_role(message)
+
+    else:
         
+        listing_channel_id = get_listing_channel_id_for_command(cmd) 
+
+        if listing_channel_id is None:
+            return
+        
+        role = get_listing_role(listing_channel_id)
+        if not role in message.author.roles:
+            return
+
+        await cmd_list_channel(listing_channel_id, message.channel)
+
+
+
 @client.event
 async def on_raw_reaction_add(payload):
 
@@ -82,215 +106,276 @@ async def on_raw_reaction_add(payload):
     if payload.member == client.user:
         return
         
+    # Only valid emojis
     is_joining = payload.emoji.name == "✅"
     is_leaving = payload.emoji.name == "❌"
-        
     if not is_joining and not is_leaving:
         return
-        
-    guild = client.get_guild(payload.guild_id)        
-    channel = guild.get_channel(payload.channel_id)
-    message = await channel.fetch_message(payload.message_id)
-
-    # Ignore reactions to messages not made by the bot
+    
+    # Ignore reactions non-bot messages
+    message = await get_message(payload.channel_id, payload.message_id)
     if message.author != client.user:
         return
     
-    target_channel_id = None
+    # Reaction to join message
+    join_listed_channel = get_listed_channel_for_join_message(message.id)
+    if not join_listed_channel is None:
+        if is_joining:
+            await add_user_to_channel(payload.member, join_listed_channel)
+        if is_leaving:
+            await remove_user_from_channel(payload.member, join_listed_channel)
 
-    if is_leaving:
-        target_channel_id = get_channel_id(LEAVE_MSG_KEY, message.id)
+    # Reaction to leave message
+    leave_listed_channel = get_listed_channel_for_leave_message(message.id)
+    if is_leaving and not leave_listed_channel is None:
+        await remove_user_from_channel(payload.member, leave_listed_channel)
 
-    if is_joining:
-        target_channel_id = get_channel_id(JOIN_MSG_KEY, message.id)
 
-    if target_channel_id is None:
-        target_channel_id = get_channel_id(LIST_MSG_KEY, message.id)
+async def cmd_create_and_list(message):
 
-    if target_channel_id == None:
-        return
-        
-    target_channel = guild.get_channel(target_channel_id)    
-    permissions = target_channel.permissions_for(payload.member)
-    can_read_messages = permissions.read_messages
-    
-    if is_joining == can_read_messages:
-        return
-        
-    if is_leaving:
-        await target_channel.send(f"**{payload.member.display_name}** left.")
-        
-    overwrite = discord.PermissionOverwrite(read_messages=is_joining)
-    await target_channel.set_permissions(payload.member, overwrite=overwrite)
-    
-    if is_joining:
-        await target_channel.send(f"**{payload.member.display_name}** joined.") 
-    
-
-async def read_command(message):
-
-    # Ignore commands from users without the role
-    role = discord.utils.get(message.guild.roles, id=int(USER_ROLE_ID))
-    if not role in message.author.roles:
-        return
-        
+    # get name
     args = message.content.split()
-    
-    # Empty message
-    if len(args) == 0:
-        return
-    
-    cmd = args[0]
-    listings_channel = await get_listings_channel()
-
-    if cmd == '$create':        
-        if (message.channel == listings_channel):
-            await create_listed_channel(message)
-        else:
-            await create_private_channel(message)
-
-    if cmd == '$list':
-        if (message.channel == listings_channel):
-            return # dont list the listings channel
-        else:
-            await list_channel(message)
-
-
-async def create_private_channel(message):
-
-    args = message.content.split()
-    
     if len(args) < 2:
-        await message.channel.send("ERROR: Must provide channel name.")
         return
-    
-    name = args[1]
-    topic = ' '.join(args[2:])
-    new_channel = await create_channel(name, topic)
-    await create_join_message(message.channel, new_channel)
-    await create_leave_message(new_channel)
+    listed_channel_name = "-".join(args[1:])
 
-
-async def create_listed_channel(message):
-
-    args = message.content.split()
-
-    if len(args) < 3:
-        return # we can't write errors in this channel
-    
-    name = args[1]
-    topic = ' '.join(args[2:])
-    new_channel = await create_channel(name, topic)    
-    await create_list_message(new_channel, topic)
-    await create_leave_message(new_channel)
-
-
-async def list_channel(message):
-
-    args = message.content.split()
-    
-    if len(args) < 2:
-        await message.channel.send("ERROR: Must provide description of channel topic.")
-        return
-    
-    await create_leave_message(message.channel)
-
-    topic = ' '.join(args[1:])
-    await create_list_message(message.channel, topic)
-
-
-async def create_channel(name, topic):
-    guild = client.get_guild(int(GUILD_ID))
-    category = discord.utils.get(guild.categories, id=int(CATEGORY_ID))
+    listing_id = message.channel.id
+    guild = get_guild()
+    category = get_category(listing_id)
     overwrites = { guild.default_role: discord.PermissionOverwrite(read_messages=False) }
-    return await guild.create_text_channel(name=name, topic=topic, overwrites=overwrites, category=category)
+    listed_channel = await guild.create_text_channel(name=listed_channel_name, overwrites=overwrites, category=category, topic="No description yet")
+
+    await cmd_list_channel(message.channel, listed_channel)
+    await add_user_to_channel(message.author, listed_channel)
 
 
-async def create_join_message(message_channel, new_channel):
+async def cmd_list_channel(listing_channel, listed_channel):
 
-    join_message = await message_channel.send(f"Channel **{new_channel.name}** has been created. \n React ✅ to join!")
+    topic = listed_channel.topic
+    if topic is None or len(topic) == 0:
+        topic = "No description yet"
+        await listed_channel.edit(topic=topic)
+
+    join_message = await listing_channel.send(f"**{listed_channel.name}**: {topic}")
     await join_message.add_reaction("✅")
-    save_message(JOIN_MSG_KEY, join_message.id, new_channel.id)
+    await join_message.add_reaction("❌")
 
-
-async def create_leave_message(channel):
-
-    # Check if there is an existing leave message
-    if (get_message_id(LEAVE_MSG_KEY, channel.id) is not None):
-        return
-
-    leave_message = await channel.send(f"Welcome to **{channel.name}**. \n React ❌ to leave.")
+    leave_message = await listed_channel.send(f"Welcome to **{listed_channel.name}**. \n React ❌ to leave.")
     await leave_message.pin()
     await leave_message.add_reaction("❌")
 
-    save_message(LEAVE_MSG_KEY, leave_message.id, channel.id)
+    save_listed_channel(listed_channel.id, listed_channel.name, listing_channel.id, join_message.id, leave_message.id)
 
 
-async def create_list_message(channel, topic):
+async def cmd_update_name(message):
 
-    list_channel = await get_listings_channel() 
-    existing_message_id = get_message_id(LIST_MSG_KEY, channel.id)
-    await channel.edit(topic=topic)
-    description = f"**{channel.name}**: {topic}"
+    args = message.content.split()
+    if len(args) < 2:
+        return
+    new_name = "-".join(args[1:])
 
-    if (existing_message_id is None):
-        list_message = await list_channel.send(description)
-        await list_message.add_reaction("✅")
-        await list_message.add_reaction("❌")
-        save_message(LIST_MSG_KEY, list_message.id, channel.id)
+    save_listed_name(message.channel.id, new_name)
+    await message.channel.edit(name=new_name)
+    await update_join_description(message.channel.id)
+    await update_leave_description(message.channel.id)
+    await message.channel.send("Channel name updated.")
+
+
+async def cmd_update_description(message):
+
+    args = message.content.split()
+    if len(args) < 2:
+        return
+    topic = " ".join(args[1:])
     
+    await message.channel.edit(topic=topic)
+    await update_join_description(message.channel.id)
+    await message.channel.send("Description updated.")
+
+
+async def cmd_update_role(message):
+
+    if len(message.role_mentions) < 1:
+        return
+    
+    role = message.role_mentions[0]
+
+    print(f'Found: {len(message.channel.overwrites.items())}')
+
+    for target, overwrite in message.channel.overwrites.items():
+        if not isinstance(target, discord.Role) and overwrite.view_channel:
+            member = await get_member(target.id)
+            await member.add_roles(role)
+            await message.channel.set_permissions(member, overwrite=None)
+
+    await message.channel.set_permissions(role, read_messages=True)
+
+    save_listed_role(message.channel.id, role.id)
+    await update_join_description(message.channel.id)
+    await message.channel.send(f"Set role to {role.mention}.")
+
+
+async def add_user_to_channel(user, channel):
+
+    role = get_listed_role(channel.id)
+    if role is None:
+        overwrite = discord.PermissionOverwrite(read_messages=True)
+        await channel.set_permissions(user, overwrite=overwrite)
     else:
-        list_message = await list_channel.fetch_message(existing_message_id)
-        await list_message.edit(content=description)
-        await channel.send("Description updated.")
+        await user.add_roles(role)
+
+    await channel.send(f"**{user.display_name}** joined.") 
 
 
-async def get_listings_channel():
-    listings_channel_id = get_field(LISTINGS_CHANNEL_ID_KEY)
-    guild = client.get_guild(int(GUILD_ID))
+async def remove_user_from_channel(user, channel):
 
-    if listings_channel_id is None:
-        listings_channel = await guild.create_text_channel(name="channel-listings", topic="Join and Leave channels from here!")
-        save_field(LISTINGS_CHANNEL_ID_KEY, listings_channel.id)
-        return listings_channel
+    await channel.send(f"**{user.display_name}** left.") 
+
+    role = get_listed_role(channel.id)
+    if role is None:
+        overwrite = discord.PermissionOverwrite(read_messages=False)
+        await channel.set_permissions(user, overwrite=overwrite)
     else:
-        return guild.get_channel(listings_channel_id)
-    
-    
-async def get_listings_message():
-    listings_channel = await get_listings_channel()
-    listings_message_id = get_field(LISTINGS_MESSAGE_ID_KEY)
-    if listings_message_id is None:
-        listings_message = await listings_channel.send(LISTINGS_MESSAGE)
-        save_field(LISTINGS_MESSAGE_ID_KEY, listings_message.id)
-        return listings_message
-    else:
-        return await listings_channel.fetch_message(listings_message_id)
-    
+        await user.remove_roles(role)
 
-def get_message_id(message_str, channel_id):
-    for message_id, match_id in DATABASE.get(str(message_str), {}).items():
-        if channel_id == match_id:
-            return int(message_id)
+
+async def update_join_description(listed_channel_id):
+    join_message = await get_join_message(listed_channel_id)
+    listed_channel = get_channel(listed_channel_id)
+    role = get_listed_role(listed_channel_id)
+
+    if role is None:
+        description = f"**{listed_channel.name}**: {listed_channel.topic}"
+    else:
+        description = f"**{listed_channel.name}**: {role.mention} {listed_channel.topic}"
+    
+    await join_message.edit(content=description)
+
+
+async def update_leave_description(listed_channel_id):
+    leave_message = await get_leave_message(listed_channel_id)
+    listed_channel = get_channel(listed_channel_id)
+    await leave_message.edit(content=f"Welcome to **{listed_channel.name}**. \n React ❌ to leave.")
+
+
+def get_listing_channels_dict():
+   return DATABASE.get("listing_channels", {})
+
+def get_listed_channels_dict():
+   return DATABASE.get("listed_channels", {})
+
+def get_listing_channel_ids():
+    return [int(key) for key in get_listing_channels_dict().keys()]
+
+def get_listed_channel_ids():
+    return [int(key) for key in get_listed_channels_dict().keys()]
+
+def get_listing_info(channel_id):
+    return get_listing_channels_dict()[str(channel_id)]
+
+def get_listed_info(channel_id):
+    return get_listed_channels_dict()[str(channel_id)]
+
+def get_listing_info_for_listed(listed_channel_id):
+    return get_listing_info(get_listed_info(listed_channel_id).get("listing_channel_id"))
+
+def get_info_message_content(channel_id):
+    channel_info = get_listing_info(channel_id)
+    channel_name = channel_info.get("name")
+    channel_command = channel_info.get("create_command")
+    return create_info_message(channel_name, channel_command)
+
+def get_listing_role(channel_id):
+    role_id = get_listing_info(channel_id).get("role_id")
+    return get_role(role_id)
+
+def get_listing_role_for_listed(listed_channel_id):
+    listing_info = get_listing_info_for_listed(listed_channel_id)
+    role_id = listing_info.get("role_id")
+    return get_role(role_id)
+
+def get_listed_role(channel_id):
+    role_id = get_listed_info(channel_id).get("role_id")
+    if (role_id is None):
+        return None
+    return get_role(role_id)
+
+async def get_info_message(channel_id):
+    message_id = get_listing_info(channel_id).get("info_message_id")
+    if (message_id is None):
+        return None
+    return await get_message(channel_id, message_id)
+
+async def get_join_message(listed_channel_id):
+    channel_info = get_listed_info(listed_channel_id)
+    listing_channel_id = channel_info.get("listing_channel_id")
+    join_message_id = channel_info.get("join_message_id")
+    return await get_message(listing_channel_id, join_message_id)
+
+async def get_leave_message(listed_channel_id):
+    leave_message_id = get_listed_info(listed_channel_id).get("leave_message_id")
+    return await get_message(listed_channel_id, leave_message_id)
+
+def get_category(listing_id):
+    guild = get_guild()
+    category_id = get_listing_info(listing_id).get("category_id")
+    return discord.utils.get(guild.categories, id=category_id)
+
+def get_listing_channel_id_for_command(command):
+    for id_str, info in get_listing_channels_dict().items():
+        if info.get("create_command") == command:
+            return int(id_str)
     return None
 
+def get_listed_channel_for_join_message(message_id):
+    for id_str, info in get_listed_channels_dict().items():
+        if info.get("join_message_id") == message_id:
+            return get_channel(int(id_str))
+    return None
 
-def get_channel_id(message_str, message_id):
-    return DATABASE.get(str(message_str), {}).get(str(message_id))
+def get_listed_channel_for_leave_message(message_id):
+    for id_str, info in get_listed_channels_dict().items():
+        if info.get("leave_message_id") == message_id:
+            return get_channel(int(id_str))
+    return None
 
+def get_guild():
+    return client.get_guild(int(GUILD_ID))
 
-def save_message(message_str, message_id, channel_id):
-    DATABASE.setdefault(message_str, {})
-    DATABASE[str(message_str)][str(message_id)] = channel_id
+def get_channel(channel_id):
+    return get_guild().get_channel(channel_id)
 
+async def get_member(user_id):
+    return await get_guild().fetch_member(user_id)
 
-def get_field(key):
-    return DATABASE.get(key)
+async def get_message(channel_id, message_id):
+    return await get_channel(channel_id).fetch_message(message_id)
 
-
-def save_field(key, value):
-    DATABASE.setdefault(key, value)
+def get_role(role_id):
+    return discord.utils.get(get_guild().roles, id=role_id)
     
+def save_info_message(channel_id, message_id):
+    get_listing_info(channel_id)["info_message_id"] = str(message_id)
+    save_database()
+
+def save_listed_name(channel_id, new_name):
+    get_listed_info(channel_id)["name"] = new_name
+    save_database()
+
+def save_listed_role(channel_id, role_id):
+    get_listed_info(channel_id)["role_id"] = role_id
+    save_database()
+
+def save_listed_channel(listed_channel_id, name, listing_channel_id, join_message_id, leave_message_id):
+    listed_dict = get_listed_channels_dict()
+    entry = {}
+    entry["name"] = name
+    entry["listing_channel_id"] = listing_channel_id
+    entry["join_message_id"] = join_message_id
+    entry["leave_message_id"] = leave_message_id
+    listed_dict[str(listed_channel_id)] = entry
+    save_database()
+
 
 def read_database():
     global DATABASE
@@ -302,8 +387,23 @@ def read_database():
         
 
 def save_database():
+    print("saving database")
     with open(DATABASE_JSON, 'w') as file:
         json.dump(DATABASE, file, indent=4)
 
+
+def create_info_message(channel_name, channel_command):
+    return f"""
+Welcome to **{channel_name}**.\n\n React with ✅ to join a channel or ❌ to leave.
+
+**Commands:**
+- To create a new channel here for people to join write `$create X` in this channel. Where X is the name of your channel. 
+- To add an existing channel here write `${channel_command}` in that channel.
+- To rename an existing channel write `$rename X` in that channel. Where X is your new channel name.
+- To set the description of an existing channel, write `$desc X` in that channel. Where X is your desired description.
+- To apply a role to a channel write `$role @X` in that channel. Where is your role mention.
+
+Note that your messages in this channel will be automatically deleted.
+."""
 
 client.run(TOKEN)
