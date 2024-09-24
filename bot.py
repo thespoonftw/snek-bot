@@ -399,7 +399,7 @@ Welcome to **{channel_name}**.\n\n React with ✅ to join a channel or ❌ to le
 
 **Commands:**
 - To create a new channel here for people to join write `$create X` in this channel. Where X is the name of your channel. 
-- To add an existing channel here write `${channel_command}` in that channel.
+- To add an existing channel here write `{channel_command}` in that channel.
 - To rename an existing channel write `$rename X` in that channel. Where X is your new channel name.
 - To set the description of an existing channel, write `$desc X` in that channel. Where X is your desired description.
 - To apply a role to a channel write `$role @X` in that channel. Where is your role mention.
