@@ -145,12 +145,13 @@ async def cmd_create_and_list(message):
     overwrites = { guild.default_role: discord.PermissionOverwrite(read_messages=False) }
     listed_channel = await guild.create_text_channel(name=listed_channel_name, overwrites=overwrites, category=category, topic="No description yet")
 
-    await cmd_list_channel(message.channel, listed_channel)
+    await cmd_list_channel(message.channel.id, listed_channel)
     await add_user_to_channel(message.author, listed_channel)
 
 
-async def cmd_list_channel(listing_channel, listed_channel):
+async def cmd_list_channel(listing_channel_id, listed_channel):
 
+    listing_channel = get_channel(listing_channel_id)
     topic = listed_channel.topic
     if topic is None or len(topic) == 0:
         topic = "No description yet"
