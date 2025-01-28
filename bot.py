@@ -234,8 +234,7 @@ async def remove_user_from_channel(user, channel):
 
     role = get_listed_role(channel.id)
     if role is None:
-        overwrite = discord.PermissionOverwrite(read_messages=False)
-        await channel.set_permissions(user, overwrite=overwrite)
+        await channel.set_permissions(user, overwrite=None)
     else:
         await user.remove_roles(role)
 
